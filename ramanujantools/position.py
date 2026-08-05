@@ -115,6 +115,7 @@ class Position(dict[sp.Symbol, sp.Expr]):
     def sorted(self) -> Position:
         return Position({key: self[key] for key in sorted(self.keys(), key=str)})
 
+
     @staticmethod
     def from_list(values: list[sp.Expr], symbol: str) -> Position:
         """

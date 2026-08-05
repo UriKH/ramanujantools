@@ -2,6 +2,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 import itertools
+import random
 
 import sympy as sp
 from sympy.abc import n
@@ -289,32 +290,56 @@ class CMF(Printable):
         )
         return flint_ctx(free_symbols, fmpz=start.is_polynomial())
 
+
     def _calculate_diagonal_matrix_backtrack(
-        self, trajectory: Position, start: Position, ctx: FlintContext
+            self, trajectory: Position, start: Position, ctx: FlintContext
     ) -> SymbolicMatrix:
         """
         Inner function of an inner function. DO NOT USE DIRECTLY.
-        This is the backtracking hook used for `_calculate_diagonal_marix`.
-        It's used to look for a non-singular path towards the trajectroy matrix.
+        This iterative approach replaces backtracking to find a non-singular path.
+        It evaluates permutations of the trajectory axes in random order to avoid
+        getting stuck in localized DFS failure branches.
         """
         if trajectory.longest() == 0:
             return SymbolicMatrix.eye(self.rank(), ctx)
-        for axis in sorted(trajectory.keys(), key=str):
+
+        # Extract axes. Assuming len(axes) is relatively small (e.g., < 10),
+        # generating all permutations into memory is highly efficient.
+        axes = list(trajectory.keys())
+
+        # Generate all possible axis orderings and shuffle them.
+        # This guarantees we sample the multiplication order randomly.
+        all_paths = list(itertools.permutations(axes))
+        random.shuffle(all_paths)
+
+        for path in all_paths:
             try:
-                inner_trajectory = trajectory.copy()
                 position = start.copy()
-                sign = inner_trajectory[axis] >= 0
-                current = SymbolicMatrix.from_sympy(self.M(axis, sign), ctx).subs(
-                    position
-                )
-                position[axis] += inner_trajectory.pop(axis)
-                return current * self._calculate_diagonal_matrix_backtrack(
-                    inner_trajectory, position, ctx
-                )
+                matrix_accumulator = None
+
+                for axis in path:
+                    sign = trajectory[axis] >= 0
+                    current = SymbolicMatrix.from_sympy(self.M(axis, sign), ctx).subs(position)
+
+                    # Advance the position by the entire movement of this axis
+                    position[axis] += trajectory[axis]
+
+                    # Accumulate the matrix multiplications (M1 * M2 * M3 ...)
+                    if matrix_accumulator is None:
+                        matrix_accumulator = current
+                    else:
+                        matrix_accumulator = matrix_accumulator * current
+
+                # If the path was successfully evaluated without division by zero:
+                return matrix_accumulator
+
             except ZeroDivisionError:
+                print("ZDE, continuing to next random permutation...")
+                # Singularity hit; jump immediately to the next random permutation
                 continue
+
         raise ZeroDivisionError(
-            "A singularity has occured in every possible trajectory combination"
+            "A singularity has occurred in every possible trajectory combination"
         )
 
     @lru_cache
@@ -339,7 +364,7 @@ class CMF(Printable):
         trajectory = Position(
             {axis: value for axis, value in trajectory.items() if value != 0}
         )
-
+        print("calling backtrack...")
         return self._calculate_diagonal_matrix_backtrack(trajectory, start, ctx)
 
     def _work_symbolic(
