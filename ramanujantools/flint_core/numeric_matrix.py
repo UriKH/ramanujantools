@@ -113,6 +113,8 @@ class NumericMatrix(fmpq_mat):
             for key, value in start.items()
         }
         one = fmpq_poly([1])
+        # Nested denominators vanish from the result, but still raise in `lambda_from_rt`
+        guards = []
 
         def convert(expr) -> tuple[fmpq_poly, fmpq_poly]:
             if isinstance(expr, sp.Rational):
@@ -135,18 +137,23 @@ class NumericMatrix(fmpq_mat):
                 exponent = int(expr.exp)
                 if exponent >= 0:
                     return numerator**exponent, denominator**exponent
-                # A nested denominator would vanish from the result, but still raises in `lambda_from_rt`
-                if denominator == 1:
-                    return one, numerator ** (-exponent)
+                if denominator != 1:
+                    guards.append(denominator)
+                return denominator ** (-exponent), numerator ** (-exponent)
             raise NotImplementedError(f"Unsupported expression: {expr}")
 
         entries = [convert(expr) for expr in matrix]
         rows, cols = matrix.shape
-        return lambda k: NumericMatrix(
-            rows,
-            cols,
-            [numerator(k) / denominator(k) for numerator, denominator in entries],
-        )
+
+        def step(k: int) -> NumericMatrix:
+            if any(guard(k) == 0 for guard in guards):
+                raise ZeroDivisionError("Nested denominator vanishes")
+            values = [
+                numerator(k) / denominator(k) for numerator, denominator in entries
+            ]
+            return NumericMatrix(rows, cols, values)
+
+        return step
 
     @staticmethod
     @batched("iterations")

@@ -108,7 +108,13 @@ def test_walk_step_lambda_iterations(iterations):
 
 @pytest.mark.parametrize(
     "entry, singular_step",
-    [(1 / n, 3), ((n**2 - 1) / (n - 1), 4), (n * (n + 1) / (n + 3) ** 2, 0)],
+    [
+        (1 / n, 3),
+        ((n**2 - 1) / (n - 1), 4),
+        (n * (n + 1) / (n + 3) ** 2, 0),
+        (1 / (2 + 1 / n), 3),  # inner denominator only
+        (1 / (1 + 1 / n), 2),  # outer denominator
+    ],
 )
 def test_walk_step_lambda_singular_step(entry, singular_step):
     matrix = Matrix([[entry, 1], [1, n]])
@@ -118,7 +124,7 @@ def test_walk_step_lambda_singular_step(entry, singular_step):
 
 @pytest.mark.parametrize(
     "entry, start",
-    [(1 / (1 + 1 / n), -3), (sp.sqrt(n), 1), (sp.sin(n), 1), (n, sp.Integer(1))],
+    [(sp.sqrt(n), 1), (sp.sin(n), 1), (n, sp.Integer(1))],
 )
 def test_walk_step_lambda_fallback(entry, start):
     matrix = Matrix([[entry, 1], [1, n]])
