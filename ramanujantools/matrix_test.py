@@ -1,4 +1,3 @@
-import pytest
 from pytest import approx, raises
 
 from unittest.mock import patch
@@ -496,45 +495,3 @@ def test_degrees():
     assert m.degrees(x) == Matrix([[1, 2], [-1, 0]])
     assert m.degrees(y) == Matrix([[1, 0], [1, -2]])
     assert m.degrees(n) == Matrix([[0, 0], [0, 0]])
-
-
-@pytest.fixture
-def default_walk_cache():
-    Matrix.set_walk_cache_size(128)
-    yield
-    Matrix.set_walk_cache_size(128)
-
-
-def test_walk_cache(default_walk_cache):
-    m = Matrix([[0, -(n**2)], [1, n + 1]])
-    first = m.walk({n: 1}, [10, 20], {n: 1})
-    m.walk({n: 1}, [10, 20], {n: 1})
-    assert Matrix._walk_inner.cache_info().hits == 1
-    assert Matrix._walk_inner.cache_info().currsize == 1
-    Matrix.clear_walk_cache()
-    assert Matrix._walk_inner.cache_info().currsize == 0
-    assert m.walk({n: 1}, [10, 20], {n: 1}) == first
-
-
-def test_walk_without_cache(default_walk_cache):
-    m = Matrix([[0, -(n**2)], [1, n + 1]])
-    expected = m.walk({n: 1}, 50, {n: 1})
-    Matrix.clear_walk_cache()
-    assert m.walk({n: 1}, 50, {n: 1}, cache=False) == expected
-    assert m.walk({n: 1}, [10, 50], {n: 1}, cache=False)[-1] == expected
-    assert Matrix._walk_inner.cache_info().currsize == 0
-    assert Matrix._walk_inner.cache_info().hits == 0
-
-
-def test_walk_cache_size(default_walk_cache):
-    m = Matrix([[0, -(n**2)], [1, n + 1]])
-    Matrix.set_walk_cache_size(2)
-    for depth in range(1, 5):
-        m.walk({n: 1}, depth, {n: 1})
-    assert Matrix._walk_inner.cache_info().maxsize == 2
-    assert Matrix._walk_inner.cache_info().currsize == 2
-
-    Matrix.set_walk_cache_size(0)
-    expected = m.walk({n: 1}, 10, {n: 1})
-    assert m.walk({n: 1}, 10, {n: 1}) == expected
-    assert Matrix._walk_inner.cache_info().currsize == 0

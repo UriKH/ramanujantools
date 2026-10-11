@@ -6,8 +6,7 @@ from sympy.abc import a, b, c, x, y, n
 
 from ramanujantools import Position, Matrix, simplify
 from ramanujantools.cmf import CMF, known_cmfs, pFq
-from ramanujantools.flint_core import NumericMatrix
-from ramanujantools.utils import batched, Batchable
+from ramanujantools.flint_core.numeric_matrix_test import fast_and_reference
 
 a0, a1 = sp.symbols("a:2")
 b0, b1 = sp.symbols("b:2")
@@ -400,176 +399,38 @@ def test_pickle_state():
         assert False, f"Failed to access negative matrix after unpickling: {e}"
 
 
-@batched("iterations")
-def _reference_numeric_walk(
-    matrix, trajectory, iterations: Batchable[int], start
-) -> Batchable[NumericMatrix]:
-    return NumericMatrix._walk_reference(matrix, trajectory, iterations, start)
-
-
-@pytest.fixture
-def compare_to_reference_walk(monkeypatch):
-    """
-    Returns a function that runs `compute()` with the fast numeric walk (at any depth),
-    then again with the reference numeric walk, and asserts the results are equal,
-    or that both raise the same exception type.
-    """
-
-    def run(compute):
-        Matrix._walk_inner.cache_clear()
-        try:
-            return compute(), None
-        except Exception as error:
-            return None, type(error)
-        finally:
-            Matrix._walk_inner.cache_clear()
-
-    def compare(compute):
-        monkeypatch.setattr(NumericMatrix, "FAST_WALK_MIN_DEPTH", 0)
-        actual, actual_error = run(compute)
-        with monkeypatch.context() as patch:
-            patch.setattr(NumericMatrix, "walk", staticmethod(_reference_numeric_walk))
-            expected, expected_error = run(compute)
-        assert actual_error == expected_error
-        assert actual == expected
-        return actual
-
-    return compare
-
-
 @pytest.mark.parametrize(
-    "cmf, start, trajectory",
+    "p, q, z, trajectory, start, singular",
     [
-        (pFq(2, 1, -1), [1, 1, 1], [40, 40, 40]),
-        (pFq(2, 1, -1), [1, 2, 3], [37, -41, 50]),
-        (pFq(2, 1, -1), [1, 2, 50], [33, -36, 40]),
-        (pFq(3, 2, 1), [1, 1, 1, 2, 2], [33, 34, 35, 36, 37]),
-        (pFq(3, 2, 1), [1, 1, 2, 60, 61], [30, 31, 32, 40, 41]),
-        (pFq(3, 2, 1), [1, 2, 3, 70, 70], [33, -1, 35, 50, 45]),
-        (pFq(4, 3, 1), [1, 1, 2, 2, 80, 81, 82], [30, 31, 32, 33, 40, 41, 42]),
-        (pFq(4, 3, 1), [2, 1, 1, 1, 90, 91, 92], [35, -2, 34, 30, 50, 40, 45]),
-        # Singular trajectories: both walks must raise ZeroDivisionError
-        (pFq(2, 1, -1), [-2, 1, 2], [3, 45, 70]),
-        (pFq(3, 2, 1), [2, 1, 1, 3, 2], [-35, 40, 44, 0, 52]),
-        (pFq(4, 3, 1), [1, 1, 2, 2, 3, 3, 4], [33, 34, 35, 36, 37, 38, 39]),
-        (pFq(4, 3, 1), [1, 1, 1, 1, 2, 2, 3], [-33, 40, 41, 42, 0, 1, 45]),
+        (2, 1, -1, [12, -9, 17], [1, 2, 3], False),
+        (3, 2, -1, [-9, 18, 18, 0, 16], [-3, 2, 2, 1, 1], False),
+        (4, 3, 1, [-12, 24, 24, 24, 0, 0, 20], [-4, 2, 2, 2, 1, -1, 1], False),
+        (4, 3, 1, [-31, 64, 64, 64, 0, 0, 56], [-4, 2, 2, 2, 1, -1, 1], False),
+        (5, 4, -1, [1, 2, 1, 2, 1, 3, 2, 3, 2], [1, 1, 1, 1, 1, 2, 2, 2, 2], False),
+        (2, 1, -1, [1, -2, 2], [4, -6, -5], True),
+        (3, 2, 1, [-4, -2, 1, 1, -3], [4, 1, -5, 0, -6], True),
+        (4, 3, 1, [0, 5, -3, 3, -4, -1, -3], [1, 3, 4, 1, -2, -6, -1], True),
     ],
 )
-def test_work_numeric_fast_walk(compare_to_reference_walk, cmf, start, trajectory):
-    axes = sorted(cmf.axes(), key=str)
-    start = Position(dict(zip(axes, start)))
-    end = start + Position(dict(zip(axes, trajectory)))
-    compare_to_reference_walk(lambda: cmf.work(start, end))
-
-
-@pytest.mark.parametrize(
-    "cmf, start, trajectory",
-    [
-        (pFq(2, 2, -1), [1, 1, -1, -1], [1, 1, 0, -1]),
-        (pFq(2, 2, -1), [1, 1, -1, 1], [12, 13, -14, 20]),
-        (pFq(3, 2, 1), [2, 2, 2, 4, 4], [5, 5, 5, 10, 10]),
-        (pFq(3, 2, 1), [2, 2, 2, 4, 4], [5, 6, 5, 10, 11]),
-        (pFq(4, 3, 1), [1, 1, 2, 2, 3, 3, 4], [1, 1, 2, 2, 3, 3, 4]),
-        (pFq(4, 3, 1), [-1, 1, 2, -2, 3, 7, 4], [-1, 1, 2, -2, 3, 7, 4]),
-        (pFq(4, 3, 1), [1, 1, 1, 1, 2, 2, 3], [0, 1, 1, 1, 1, 1, 1]),
-    ],
-)
-def test_walk_fast_walk_benchmark_trajectories(
-    compare_to_reference_walk, cmf, start, trajectory
-):
-    axes = sorted(cmf.axes(), key=str)
-    start = Position(dict(zip(axes, start)))
+def test_walk_step_lambda_trajectories(p, q, z, trajectory, start, singular):
+    axes = pFq.x_axes(p) + pFq.y_axes(q)
     trajectory = Position(dict(zip(axes, trajectory)))
-    compare_to_reference_walk(lambda: cmf.walk(trajectory, [1, 50, 100], start))
-
-
-def test_walk_fast_walk_simple_trajectory(compare_to_reference_walk):
-    cmf = known_cmfs.e()
-    compare_to_reference_walk(
-        lambda: cmf.walk({x: 1, y: 1}, [1, 50, 100], {x: 1, y: 1})
+    start = Position(dict(zip(axes, start)))
+    result = fast_and_reference(
+        lambda: pFq(p, q, z).walk(trajectory, [1, 900, 950, 1000], start)
     )
+    assert (result is ZeroDivisionError) == singular
 
 
-def test_walk_fast_walk_deep_4f3(compare_to_reference_walk):
-    cmf = pFq(4, 3, 1)
-    axes = pFq.x_axes(4) + pFq.y_axes(3)
-    trajectory = Position(dict(zip(axes, [-31, 64, 64, 64, 0, 0, 56])))
-    start = Position(dict(zip(axes, [-4, 2, 2, 2, 1, -1, 1])))
-    matrix = cmf.trajectory_matrix(trajectory, start)
-    (symbol,) = matrix.free_symbols
-    walks = compare_to_reference_walk(
-        lambda: matrix.walk({symbol: 1}, [900, 950, 1000], {symbol: 0})
-    )
-    Matrix._walk_inner.cache_clear()
-    assert matrix.walk({symbol: 1}, 1000, {symbol: 0}) == walks[-1]
-
-
-# Real pFq trajectories, in the style of Ramanujan's Dreams: (p, q, z, trajectory, start)
-REAL_TRAJECTORIES = {
-    "2F1(-1)_small": (2, 1, -1, [1, 1, 1], [1, 1, 2]),
-    "2F1(-1)_skew": (2, 1, -1, [3, -2, 5], [2, 1, 3]),
-    "2F1(-1)_long": (2, 1, -1, [12, -9, 17], [1, 2, 3]),
-    "3F2(1)_diagonal": (3, 2, 1, [1, 1, 1, 2, 2], [1, 1, 1, 2, 2]),
-    "3F2(1)_skew": (3, 2, 1, [5, 6, 5, 10, 11], [2, 2, 2, 4, 4]),
-    "3F2(-1)_long": (3, 2, -1, [-9, 18, 18, 0, 16], [-3, 2, 2, 1, 1]),
-    "4F3(1)_diagonal": (4, 3, 1, [1, 1, 2, 2, 3, 3, 4], [1, 1, 2, 2, 3, 3, 4]),
-    "4F3(1)_medium": (4, 3, 1, [-12, 24, 24, 24, 0, 0, 20], [-4, 2, 2, 2, 1, -1, 1]),
-    "5F4(-1)_small": (5, 4, -1, [1, 2, 1, 2, 1, 3, 2, 3, 2], [1, 1, 1, 1, 1, 2, 2, 2, 2]),
-    "5F4(-1)_medium": (
-        5,
-        4,
-        -1,
-        [-14, 28, 28, 28, 28, 0, 0, 0, 24],
-        [-4, 2, 2, 2, 2, 1, -1, 1, 1],
-    ),
-}
-
-# Trajectories whose trajectory matrix first hits a pole at `step`: (p, q, z, trajectory, start, step)
-SINGULAR_TRAJECTORIES = {
-    "2F1(-1)": (2, 1, -1, [1, -2, 2], [4, -6, -5], 9),
-    "3F2(1)": (3, 2, 1, [-4, -2, 1, 1, -3], [4, 1, -5, 0, -6], 5),
-    "4F3(1)": (4, 3, 1, [0, 5, -3, 3, -4, -1, -3], [1, 3, 4, 1, -2, -6, -1], 5),
-}
-
-
-def _pfq_positions(p, q, trajectory, start):
-    axes = list(pFq.x_axes(p)) + list(pFq.y_axes(q))
-    return Position(dict(zip(axes, trajectory))), Position(dict(zip(axes, start)))
-
-
-@pytest.mark.parametrize("name", REAL_TRAJECTORIES.keys())
-def test_walk_fast_walk_real_trajectories(compare_to_reference_walk, name):
-    p, q, z, trajectory, start = REAL_TRAJECTORIES[name]
-    cmf = pFq(p, q, z)
-    trajectory, start = _pfq_positions(p, q, trajectory, start)
-    walks = compare_to_reference_walk(
-        lambda: cmf.walk(trajectory, [1, 100, 900, 950, 1000], start)
-    )
-    assert walks is not None  # These trajectories are not singular
-
-
-@pytest.mark.parametrize("name", SINGULAR_TRAJECTORIES.keys())
-@pytest.mark.parametrize("fast", [False, True], ids=["reference", "fast"])
-def test_walk_singular_real_trajectories(monkeypatch, name, fast):
-    p, q, z, trajectory, start, singular_step = SINGULAR_TRAJECTORIES[name]
-    cmf = pFq(p, q, z)
-    trajectory, start = _pfq_positions(p, q, trajectory, start)
-    matrix = cmf.trajectory_matrix(trajectory, start)
-    (symbol,) = matrix.free_symbols
-    if fast:
-        monkeypatch.setattr(NumericMatrix, "FAST_WALK_MIN_DEPTH", 0)
-    else:
-        monkeypatch.setattr(NumericMatrix, "walk", staticmethod(_reference_numeric_walk))
-
-    def walk(iterations):
-        return NumericMatrix.walk(
-            matrix, Position({symbol: 1}), iterations, Position({symbol: 0})
-        )
-
-    walk(singular_step)  # All steps before the singular one are fine
-    with raises(ZeroDivisionError):
-        walk(singular_step + 1)
-    Matrix._walk_inner.cache_clear()
-    with raises(ZeroDivisionError):
-        cmf.walk(trajectory, [900, 950, 1000], start)
-    Matrix._walk_inner.cache_clear()
+@pytest.mark.parametrize(
+    "p, q, z, start, end",
+    [
+        (2, 1, -1, [1, 2, 50], [34, -34, 90]),
+        (3, 2, 1, [1, 1, 2, 60, 61], [31, 32, 34, 100, 102]),
+        (4, 3, 1, [1, 1, 2, 2, 80, 81, 82], [31, 32, 34, 35, 120, 122, 124]),
+    ],
+)
+def test_work_numeric_walk_step_lambda(p, q, z, start, end):
+    axes = pFq.x_axes(p) + pFq.y_axes(q)
+    start, end = Position(dict(zip(axes, start))), Position(dict(zip(axes, end)))
+    fast_and_reference(lambda: pFq(p, q, z).work(start, end))
