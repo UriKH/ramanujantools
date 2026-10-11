@@ -257,15 +257,14 @@ class Matrix(sp.Matrix):
 
         return self._companionization(symbol).companion
 
-    @lru_cache
-    def _walk_inner(
+    def _walk_uncached(
         self,
         trajectory: Position,
         iterations: tuple[int],
         start: Position,
     ) -> list[Matrix]:
         """
-        Internal walk function, used for type conversions and for caching. Do not use directly.
+        Internal walk function, used for type conversions. Do not use directly.
         """
         iterations = list(iterations)
         if self._is_numeric_walk(trajectory, start):
@@ -279,12 +278,38 @@ class Matrix(sp.Matrix):
             results = as_flint.walk(trajectory, iterations, start)
             return [result.factor() for result in results]
 
+    # Walk results, keyed on the matrix, trajectory, iterations and start.
+    # Holds on to both the results and the matrices; see `set_walk_cache_size`.
+    _walk_inner = lru_cache(maxsize=128)(_walk_uncached)
+
+    @staticmethod
+    def set_walk_cache_size(maxsize: int | None) -> None:
+        """
+        Sets the maximal number of `walk` calls whose results are cached (default 128).
+
+        The cache is shared by all matrices, and keeps both the walk results and the
+        matrices themselves alive, which can add up in long-running processes walking
+        many large matrices. Changing the size discards all cached results.
+
+        Args:
+            maxsize: The new cache size. 0 disables caching, None makes it unbounded.
+        """
+        Matrix._walk_inner = lru_cache(maxsize=maxsize)(Matrix._walk_uncached)
+
+    @staticmethod
+    def clear_walk_cache() -> None:
+        """
+        Discards all cached `walk` results, see `set_walk_cache_size`.
+        """
+        Matrix._walk_inner.cache_clear()
+
     @batched("iterations")
     def walk(
         self,
         trajectory: dict,
         iterations: Batchable[int],
         start: dict,
+        cache: bool = True,
     ) -> Batchable[Matrix]:
         r"""
         Returns the multiplication result of walking in a certain trajectory.
@@ -299,6 +324,8 @@ class Matrix(sp.Matrix):
             trajectory: the trajectory of a single step in the walk, as defined above.
             iterations: The amount of multiplications to perform. Can be an integer value or a list of values.
             start: the starting point of the matrix multiplication
+            cache: If True (default), results are read from and stored in the walk cache,
+                shared by all matrices. See `Matrix.set_walk_cache_size` and `Matrix.clear_walk_cache`.
         Returns:
             The walk multiplication matrix as defined above.
             If iterations is list, returns a list of matrices.
@@ -329,9 +356,8 @@ class Matrix(sp.Matrix):
             raise ValueError(
                 f"iterations must contain only non-negative values, got {iterations}"
             )
-        return self._walk_inner(
-            Position(trajectory), tuple(iterations), Position(start)
-        )
+        walk = self._walk_inner if cache else self._walk_uncached
+        return walk(Position(trajectory), tuple(iterations), Position(start))
 
     def walk_free_symbols(self, start: dict) -> set[sp.Symbol]:
         """

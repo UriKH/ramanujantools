@@ -77,6 +77,15 @@ def test_walk_benchmark(benchmark, matrix_name, depth):
     benchmark(walk_benchmark, MATRICES[matrix_name], {n: 1}, depth, {n: 1})
 
 
+SHALLOW_DEPTHS = [10, 50, 100]
+
+
+@pytest.mark.parametrize("depth", SHALLOW_DEPTHS, ids=[f"N={d}" for d in SHALLOW_DEPTHS])
+def test_walk_shallow_pcf_benchmark(benchmark, depth):
+    # Small matrix, small depth: one-time conversion overhead dominates here.
+    benchmark(walk_benchmark, MATRICES["2x2_pcf"], {n: 1}, depth, {n: 1})
+
+
 def companion_benchmark(matrix):
     Matrix._companionization.cache_clear()
     Matrix.companion_coboundary_matrix.cache_clear()

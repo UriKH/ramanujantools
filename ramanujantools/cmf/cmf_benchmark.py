@@ -1,8 +1,9 @@
 import hashlib
 
+import pytest
 import sympy as sp
 
-from ramanujantools import Position
+from ramanujantools import Matrix, Position
 from ramanujantools.cmf import CMF, e, pFq
 
 a0, a1 = sp.symbols("a:2")
@@ -185,3 +186,42 @@ def test_sub_cmf_3f3(benchmark):
         b1: Position({x0: 1, x1: 0, x2: 0, y0: 1, y1: 0, y2: 0}),
     }
     benchmark(CMF.sub_cmf, cmf, basis)
+
+
+@pytest.fixture(scope="module")
+def deep_4f3_matrix():
+    cmf = pFq(4, 3, 1)
+    axes = pFq.x_axes(4) + pFq.y_axes(3)
+    trajectory = Position(dict(zip(axes, [-31, 64, 64, 64, 0, 0, 56])))
+    start = Position(dict(zip(axes, [-4, 2, 2, 2, 1, -1, 1])))
+    return cmf.trajectory_matrix(trajectory, start)
+
+
+@pytest.fixture(scope="module")
+def deep_5f4_matrix():
+    cmf = pFq(5, 4, -1)
+    axes = pFq.x_axes(5) + pFq.y_axes(4)
+    trajectory = Position(dict(zip(axes, [-34, 68, 68, 68, 68, 0, 0, 0, 58])))
+    start = Position(dict(zip(axes, [-4, 2, 2, 2, 2, 1, -1, 1, 1])))
+    return cmf.trajectory_matrix(trajectory, start)
+
+
+def _walk_trajectory_matrix(matrix, iterations):
+    Matrix._walk_inner.cache_clear()
+    (symbol,) = matrix.free_symbols
+    return matrix.walk({symbol: 1}, iterations, {symbol: 0})
+
+
+@pytest.mark.parametrize(
+    "iterations", [1000, [900, 950, 1000]], ids=["N=1000", "N=[900,950,1000]"]
+)
+def test_walk_trajectory_matrix_4f3_deep(benchmark, deep_4f3_matrix, iterations):
+    # 3x3, numerator degree 358
+    benchmark.pedantic(
+        _walk_trajectory_matrix, args=(deep_4f3_matrix, iterations), rounds=3
+    )
+
+
+def test_walk_trajectory_matrix_5f4_deep(benchmark, deep_5f4_matrix):
+    # 5x5, numerator degree 338
+    benchmark.pedantic(_walk_trajectory_matrix, args=(deep_5f4_matrix, 1000), rounds=3)
