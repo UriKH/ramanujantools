@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
 from numbers import Integral
 
 import sympy as sp
@@ -18,6 +21,14 @@ from ramanujantools.flint_core.context import (
 )
 
 theta_x, theta_y = sp.symbols("theta_x theta_y")
+
+# The CMF whose block determinants are computed by forked worker processes (see `KdF.determinants`).
+# Forked workers inherit it, so the large FLINT matrices are never pickled.
+_forked_cmf = None
+
+
+def _forked_determinant(axis: sp.Symbol) -> sp.Expr:
+    return _forked_cmf._representative_determinant(axis)
 
 
 def _to_sympy(value: FlintRational) -> sp.Expr:
@@ -456,17 +467,49 @@ class KdF(CMF):
             raise ValueError(f"not a KdF axis: {axis}")
         # The construction is symmetric within each block, so the determinant of any axis is obtained from
         # the first axis of its block by swapping the two symbols.
-        representative = next(
-            block[0] for block in KdF.blocks(*self.counts) if axis in block
-        )
+        representative = self._representative(axis)
         if representative not in self._determinants:
-            rows, normalizer = self._flint_matrix(representative)
-            self._determinants[representative] = KdF._flint_determinant(
-                rows, normalizer
+            self._determinants[representative] = self._representative_determinant(
+                representative
             )
         return self._determinants[representative].xreplace(
             {representative: axis, axis: representative}
         )
+
+    def determinants(self, processes: int | None = None) -> dict[sp.Symbol, sp.Expr]:
+        r"""
+        Returns the factored determinants of all axis matrices (see `determinant`).
+
+        The blocks are independent, so their determinants are computed in parallel, in forked processes.
+        Falls back to sequential computation where fork is unavailable (e.g. Windows).
+
+        :param processes: the maximal number of processes. Defaults to the number of CPUs.
+        """
+        missing = [
+            block[0]
+            for block in KdF.blocks(*self.counts)
+            if block and block[0] not in self._determinants
+        ]
+        processes = min(len(missing), processes or os.cpu_count() or 1)
+        if processes > 1 and "fork" in multiprocessing.get_all_start_methods():
+            global _forked_cmf
+            _forked_cmf = self
+            try:
+                with ProcessPoolExecutor(
+                    processes, mp_context=multiprocessing.get_context("fork")
+                ) as executor:
+                    results = list(executor.map(_forked_determinant, missing))
+            finally:
+                _forked_cmf = None
+            self._determinants.update(zip(missing, results))
+        return {axis: self.determinant(axis) for axis in self.matrices}
+
+    def _representative(self, axis: sp.Symbol) -> sp.Symbol:
+        return next(block[0] for block in KdF.blocks(*self.counts) if axis in block)
+
+    def _representative_determinant(self, representative: sp.Symbol) -> sp.Expr:
+        rows, normalizer = self._flint_matrix(representative)
+        return KdF._flint_determinant(rows, normalizer)
 
     @staticmethod
     def _flint_determinant(

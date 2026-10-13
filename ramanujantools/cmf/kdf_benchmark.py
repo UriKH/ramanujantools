@@ -20,6 +20,16 @@ def test_determinants_l2chi3(benchmark):
     benchmark.pedantic(determinants, rounds=1)
 
 
+def test_determinants_parallel_l2chi3(benchmark):
+    cmf = KdF(3, 2, 1, 3, 1, 0, quarter, quarter)
+
+    def determinants():
+        cmf._determinants.clear()
+        return cmf.determinants()
+
+    benchmark.pedantic(determinants, rounds=1)
+
+
 def test_construct_and_determinants_generic(benchmark):
     """The same family with symbolic arguments (generic construction, rank 11)."""
 

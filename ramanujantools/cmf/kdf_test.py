@@ -104,6 +104,13 @@ def test_determinant_after_pickle():
         assert cmf.determinant(axis) == unpickled.determinant(axis)
 
 
+def test_determinants_in_parallel():
+    cmf = KdF(2, 1, 0, 1, 1, 0, 1, 1)
+    expected = {axis: cmf.determinant(axis) for axis in cmf.axes()}
+    cmf._determinants.clear()
+    assert expected == cmf.determinants(processes=2)
+
+
 def test_determinant_invalid_axis():
     with pytest.raises(ValueError):
         KdF(1, 0, 0, 1, 1, 0).determinant(sp.Symbol("z0"))
