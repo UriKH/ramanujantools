@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import math
 import multiprocessing
 import os
+from array import array
+from collections import OrderedDict
+from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from numbers import Integral
 
+import flint
 import sympy as sp
 from sympy.core.mul import _keep_coeff
 from sympy.abc import x, y
 from sympy.polys.matrices import DomainMatrix
 
-from ramanujantools import Matrix
+from ramanujantools import Matrix, Position
 from ramanujantools.cmf import CMF
-from ramanujantools.flint_core import FlintRational
+from ramanujantools.flint_core import FlintRational, SymbolicMatrix
 from ramanujantools.flint_core.context import (
     FlintContext,
     _flint_polynomial_to_sympy,
@@ -36,6 +41,145 @@ def _to_sympy(value: FlintRational) -> sp.Expr:
     if value.denominator == 1:
         return numerator
     return numerator / _flint_polynomial_to_sympy(value.denominator)
+
+
+class _LazyMatrices(Mapping):
+    """The axis matrices of a CMF as a mapping, each built on first access."""
+
+    def __init__(self, axes, build):
+        self._axes = tuple(axes)
+        self._build = build
+        self._matrices = {}
+
+    def __getitem__(self, axis):
+        if axis not in self._matrices:
+            if axis not in self._axes:
+                raise KeyError(axis)
+            self._matrices[axis] = self._build(axis)
+        return self._matrices[axis]
+
+    def __contains__(self, axis):
+        return axis in self._axes
+
+    def __iter__(self):
+        return iter(self._axes)
+
+    def __len__(self):
+        return len(self._axes)
+
+
+def _pack_polynomial(polynomial) -> tuple[array, list[int]]:
+    """A compact picklable form: flattened exponents, then interleaved coefficient numerators and denominators."""
+    exponents = array("I", (e for monomial in polynomial.monoms() for e in monomial))
+    coefficients = [
+        int(part)
+        for coefficient in polynomial.coeffs()
+        for part in (coefficient.numerator, coefficient.denominator)
+    ]
+    return exponents, coefficients
+
+
+def _unpack_polynomial(packed, ctx: FlintContext):
+    exponents, coefficients = packed
+    count = ctx.nvars()
+    monomials = (
+        tuple(exponents[k : k + count]) for k in range(0, len(exponents), count)
+    )
+    values = (
+        flint.fmpq(coefficients[k], coefficients[k + 1])
+        for k in range(0, len(coefficients), 2)
+    )
+    return ctx.from_dict(dict(zip(monomials, values)))
+
+
+def _pack_matrix(rows: list[list[FlintRational]]) -> list:
+    return [
+        [(_pack_polynomial(v.numerator), _pack_polynomial(v.denominator)) for v in row]
+        for row in rows
+    ]
+
+
+def _unpack_matrix(rows: list, ctx: FlintContext) -> list[list[FlintRational]]:
+    return [
+        [
+            FlintRational(
+                _unpack_polynomial(numerator, ctx),
+                _unpack_polynomial(denominator, ctx),
+                ctx,
+            )
+            for numerator, denominator in row
+        ]
+        for row in rows
+    ]
+
+
+class _SingularMatrix(ZeroDivisionError):
+    pass
+
+
+def _substitute(value: FlintRational, values: list) -> FlintRational:
+    """
+    Substitutes the generators of the context of `value` by `values` (polynomials of another context).
+    :raises ZeroDivisionError: if the denominator vanishes.
+    """
+    target = values[0].context()
+    denominator = value.denominator.compose(*values, ctx=target)
+    if denominator == 0:
+        raise ZeroDivisionError("Pole in a step matrix")
+    return FlintRational(
+        value.numerator.compose(*values, ctx=target), denominator, target
+    )
+
+
+def _invert(rows: list[list[FlintRational]]) -> list[list[FlintRational]]:
+    """
+    Inverts a matrix of FLINT rational functions by Gauss-Jordan elimination over the field.
+    :raises ZeroDivisionError: if the matrix is singular.
+    """
+    size = len(rows)
+    ctx = rows[0][0].ctx
+    zero = FlintRational(ctx.constant(0), ctx.constant(1), ctx)
+    one = FlintRational(ctx.constant(1), ctx.constant(1), ctx)
+    rows = [
+        list(row) + [one if i == j else zero for j in range(size)]
+        for i, row in enumerate(rows)
+    ]
+    for k in range(size):
+        candidates = [i for i in range(k, size) if rows[i][k].numerator != 0]
+        if not candidates:
+            raise _SingularMatrix("Singular matrix")
+        pivot = min(
+            candidates,
+            key=lambda i: len(rows[i][k].numerator) + len(rows[i][k].denominator),
+        )
+        rows[k], rows[pivot] = rows[pivot], rows[k]
+        rows[k] = [value / rows[k][k] for value in rows[k]]
+        for i in range(size):
+            if i != k and rows[i][k].numerator != 0:
+                scale = rows[i][k]
+                rows[i] = [u - scale * v for u, v in zip(rows[i], rows[k])]
+    return [row[size:] for row in rows]
+
+
+def _change_context(value: FlintRational, ctx: FlintContext) -> FlintRational:
+    """Moves a rational function to a context with the same generators (rational or integer coefficients)."""
+    if value.ctx is ctx:
+        return value
+    if isinstance(ctx, flint.fmpq_mpoly_ctx):
+        numerator = ctx.from_dict(value.numerator.to_dict())
+        denominator = ctx.from_dict(value.denominator.to_dict())
+        return FlintRational(numerator, denominator, ctx)
+    # Integer coefficients: clear the denominators of the coefficients of both polynomials.
+    scale = 1
+    for coefficient in value.numerator.coeffs() + value.denominator.coeffs():
+        scale = math.lcm(scale, int(coefficient.denominator))
+    numerator, denominator = (
+        ctx.from_dict(
+            {m: int((c * scale).numerator) for m, c in polynomial.to_dict().items()}
+        )
+        for polynomial in (value.numerator, value.denominator)
+    )
+    return FlintRational(numerator, denominator, ctx)
 
 
 def _factor(polynomial) -> tuple[sp.Rational, sp.Expr]:
@@ -81,6 +225,10 @@ class KdF(CMF):
     In both cases, the matrix of an axis is $(N I + \Theta) / N$, where $\Theta$ is the matrix of
     $\theta_x + \theta_y$, $\theta_x$ or $\theta_y$ (by the block of the axis) and $N$ is $a$ or $-(nd + 1)$.
     """
+
+    STEP_CACHE_SIZE = (
+        4096  # Substituted step matrices kept per CMF (see `_step_matrix`).
+    )
 
     def __init__(
         self,
@@ -135,9 +283,17 @@ class KdF(CMF):
                     raise
         if theta is None:
             theta = self._specialized_theta_matrices(max_pairs)
+        self._initialize(theta, determinants={})
+
+    def _initialize(self, theta: tuple[list, list, FlintContext], determinants: dict):
         self._theta = theta
-        self._determinants = {}
-        super().__init__(self._sympy_matrices(), validate=False)
+        self._total = None
+        self._sympy_operators = {}
+        self._exact_steps = {}
+        self._step_cache = OrderedDict()
+        self._determinants = determinants
+        axes = sum(KdF.blocks(*self.counts), ())
+        super().__init__(_LazyMatrices(axes, self._sympy_matrix), validate=False)
 
     def _generic_theta_matrices(self) -> tuple[list, list, FlintContext]:
         theta_x_matrix, theta_y_matrix = KdF._theta_matrices(
@@ -186,41 +342,39 @@ class KdF(CMF):
 
     def _flint_operators(self) -> dict[str, list[list[FlintRational]]]:
         theta_x_matrix, theta_y_matrix, _ = self._theta
-        total = [
-            [u + v for u, v in zip(row_x, row_y)]
-            for row_x, row_y in zip(theta_x_matrix, theta_y_matrix)
-        ]
-        return {"total": total, "x": theta_x_matrix, "y": theta_y_matrix}
+        if self._total is None:
+            self._total = [
+                [u + v for u, v in zip(row_x, row_y)]
+                for row_x, row_y in zip(theta_x_matrix, theta_y_matrix)
+            ]
+        return {"total": self._total, "x": theta_x_matrix, "y": theta_y_matrix}
 
-    def _sympy_matrices(self) -> dict[sp.Symbol, Matrix]:
+    def _sympy_matrix(self, axis: sp.Symbol) -> Matrix:
         r"""
-        Converts the axis matrices $(N I + \Theta) / N$ to sympy.
+        Converts the matrix $(N I + \Theta) / N$ of an axis to sympy.
         Every operator $\Theta$ is converted once, and only the diagonal is converted per axis.
         """
         _, _, ctx = self._theta
-        convert = flint_converter(ctx)
-        operators = self._flint_operators()
-        converted = {}
-        matrices = {}
-        for axis in sum(KdF.blocks(*self.counts), ()):
-            name, normalizer = self._operator(axis)
-            operator = operators[name]
-            if name not in converted:
-                converted[name] = [
-                    [_to_sympy(value) for value in row] for row in operator
-                ]
-            flint_normalizer = FlintRational(convert(normalizer), ctx.constant(1), ctx)
-            rank = len(operator)
-            matrices[axis] = Matrix(
-                rank,
-                rank,
-                lambda i, j: (
-                    _to_sympy((operator[i][i] + flint_normalizer) / flint_normalizer)
-                    if i == j
-                    else converted[name][i][j] / normalizer
-                ),
-            )
-        return matrices
+        name, normalizer = self._operator(axis)
+        operator = self._flint_operators()[name]
+        if name not in self._sympy_operators:
+            self._sympy_operators[name] = [
+                [_to_sympy(value) for value in row] for row in operator
+            ]
+        converted = self._sympy_operators[name]
+        flint_normalizer = FlintRational(
+            flint_converter(ctx)(normalizer), ctx.constant(1), ctx
+        )
+        rank = len(operator)
+        return Matrix(
+            rank,
+            rank,
+            lambda i, j: (
+                _to_sympy((operator[i][i] + flint_normalizer) / flint_normalizer)
+                if i == j
+                else converted[i][j] / normalizer
+            ),
+        )
 
     def _flint_matrix(
         self, axis: sp.Symbol
@@ -229,18 +383,6 @@ class KdF(CMF):
         Returns the matrix of an axis as FLINT rational functions, as a pair $(N I + \Theta, N)$
         such that the matrix is $(N I + \Theta) / N$ (see `_operator`).
         """
-        if self._theta is None:  # e.g. after unpickling
-            matrix = self.matrices[axis]
-            ctx = KdF._flint_context(self.counts, self.x, self.y)
-            convert = flint_converter(ctx)
-            rows = [
-                [
-                    FlintRational.from_sympy(matrix[i, j], ctx, convert)
-                    for j in range(matrix.cols)
-                ]
-                for i in range(matrix.rows)
-            ]
-            return rows, FlintRational(ctx.constant(1), ctx.constant(1), ctx)
         _, _, ctx = self._theta
         name, normalizer = self._operator(axis)
         operator = self._flint_operators()[name]
@@ -257,20 +399,157 @@ class KdF(CMF):
         return f"KdF({self.counts + (self.x, self.y)})"
 
     def __getstate__(self):
-        state = {"matrices": self.matrices}
-        state.update({"counts": self.counts, "x": self.x, "y": self.y})
-        state.update({"basis": self.basis, "basis_info": self.basis_info})
-        return state
+        r"""
+        Pickles the FLINT matrices of $\theta_x, \theta_y$ (packed), not the sympy matrices,
+        which are rebuilt only when accessed. The computed determinants are kept.
+        """
+        theta_x_matrix, theta_y_matrix, ctx = self._theta
+        return {
+            "counts": self.counts,
+            "x": self.x,
+            "y": self.y,
+            "basis": self.basis,
+            "basis_info": self.basis_info,
+            "symbols": [str(generator) for generator in ctx.gens()],
+            "theta": [_pack_matrix(m) for m in (theta_x_matrix, theta_y_matrix)],
+            "determinants": self._determinants,
+        }
 
     def __setstate__(self, state):
-        self._theta = None
-        self._determinants = {}
         self.counts = state["counts"]
         self.x = state["x"]
         self.y = state["y"]
         self.basis = state["basis"]
         self.basis_info = state["basis_info"]
-        super().__setstate__(state["matrices"])
+        ctx = flint_ctx([sp.Symbol(name) for name in state["symbols"]], fmpz=False)
+        theta = tuple(_unpack_matrix(m, ctx) for m in state["theta"]) + (ctx,)
+        self._initialize(theta, dict(state["determinants"]))
+
+    def _definition(self) -> tuple:
+        # The sizes, arguments and basis determine the matrices.
+        return (self.counts, self.x, self.y, self.basis)
+
+    def __hash__(self) -> int:
+        return hash(self._definition())
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, KdF):
+            return self._definition() == other._definition()
+        return super().__eq__(other)
+
+    def free_symbols(self) -> set[sp.Symbol]:
+        return (
+            set(sum(KdF.blocks(*self.counts), ()))
+            | self.x.free_symbols
+            | self.y.free_symbols
+        )
+
+    def rank(self) -> int:
+        return len(self._theta[0])
+
+    def validate_matrices_same_dimension(self) -> None:
+        pass  # All axis matrices are built from the same operators.
+
+    def _step_matrix(
+        self, axis: sp.Symbol, sign: bool, position: Position, ctx: FlintContext
+    ) -> SymbolicMatrix:
+        r"""
+        Returns `M(axis, sign)` substituted at `position`, computed directly from the FLINT matrices.
+
+        Fast path: the operators are substituted first (for a numeric start this leaves a small matrix in the
+        trajectory symbol), and a backward step is inverted after the substitution. This is exact whenever no
+        denominator vanishes. If a denominator vanishes, the reduced (multivariate) matrix of the step is
+        substituted instead, exactly as in `CMF._step_matrix`, so the poles found are the same. A finite singular
+        forward matrix needs no fallback: the determinant of its inverse has a pole, so the inverse does too.
+
+        :raises ZeroDivisionError: if the matrix has a pole at `position`.
+        """
+        # Different axis orderings of a trajectory revisit the same steps, so steps (and poles) are cached.
+        key = (axis, sign, tuple(sorted(position.items(), key=str)), ctx)
+        if key not in self._step_cache:
+            try:
+                self._step_cache[key] = self._compute_step_matrix(
+                    axis, sign, position, ctx
+                )
+            except ZeroDivisionError as error:
+                self._step_cache[key] = error
+            while len(self._step_cache) > KdF.STEP_CACHE_SIZE:
+                self._step_cache.popitem(last=False)
+        self._step_cache.move_to_end(key)
+        result = self._step_cache[key]
+        if isinstance(result, ZeroDivisionError):
+            raise ZeroDivisionError(*result.args)
+        return result
+
+    def _compute_step_matrix(
+        self, axis: sp.Symbol, sign: bool, position: Position, ctx: FlintContext
+    ) -> SymbolicMatrix:
+        target = flint_ctx([sp.Symbol(str(g)) for g in ctx.gens()], fmpz=False)
+        try:
+            rows = self._substituted_step(axis, sign, position, target)
+        except _SingularMatrix:
+            # A finite singular forward matrix: its inverse (the backward matrix) has a pole here.
+            raise
+        except ZeroDivisionError:
+            rows = [
+                [_substitute(value, self._values(position, target)) for value in row]
+                for row in self._exact_step(axis, sign)
+            ]
+        values = [_change_context(value, ctx) for row in rows for value in row]
+        return SymbolicMatrix(self.rank(), self.rank(), values, ctx)
+
+    def _values(self, position: Position, target: FlintContext) -> list:
+        """The values of the generators of the FLINT context of the CMF at `position`, in `target`."""
+        convert = flint_converter(target)
+        symbols = (sp.Symbol(str(g)) for g in self._theta[2].gens())
+        return [convert(sp.S(position.get(symbol, symbol))) for symbol in symbols]
+
+    def _substituted_step(
+        self, axis: sp.Symbol, sign: bool, position: Position, target: FlintContext
+    ) -> list[list[FlintRational]]:
+        if not sign:
+            position = position.copy()
+            position[axis] = position[axis] - 1
+        name, normalizer = self._operator(axis)
+        theta_x_matrix, theta_y_matrix, _ = self._theta
+        operators = {
+            "total": (theta_x_matrix, theta_y_matrix),
+            "x": (theta_x_matrix,),
+            "y": (theta_y_matrix,),
+        }[name]
+        values = self._values(position, target)
+        normalizer = flint_converter(target)(sp.S(normalizer).subs(position))
+        if normalizer == 0:
+            raise ZeroDivisionError(f"Pole in the matrix of {axis} at {position}")
+        normalizer = FlintRational(normalizer, target.constant(1), target)
+        rows = []
+        for i in range(self.rank()):
+            row = []
+            for j in range(self.rank()):
+                value = sum(
+                    (_substitute(operator[i][j], values) for operator in operators[1:]),
+                    _substitute(operators[0][i][j], values),
+                )
+                row.append((value + normalizer if i == j else value) / normalizer)
+            rows.append(row)
+        return _invert(rows) if not sign else rows
+
+    def _exact_step(self, axis: sp.Symbol, sign: bool) -> list[list[FlintRational]]:
+        """
+        The reduced matrix `M(axis, sign)` as multivariate FLINT rational functions (cached).
+        A backward step is the inverse of the forward matrix with `axis` shifted by -1.
+        """
+        if (axis, sign) not in self._exact_steps:
+            rows, normalizer = self._flint_matrix(axis)
+            rows = [[value / normalizer for value in row] for row in rows]
+            if not sign:
+                ctx = self._theta[2]
+                shift = [g - 1 if str(g) == str(axis) else g for g in ctx.gens()]
+                rows = _invert(
+                    [[_substitute(value, shift) for value in row] for row in rows]
+                )
+            self._exact_steps[axis, sign] = rows
+        return self._exact_steps[axis, sign]
 
     @staticmethod
     def _validate_counts(counts) -> tuple[int, ...]:
@@ -481,7 +760,7 @@ class KdF(CMF):
         Returns the factored determinants of all axis matrices (see `determinant`).
 
         The blocks are independent, so their determinants are computed in parallel, in forked processes.
-        Falls back to sequential computation where fork is unavailable (e.g. Windows).
+        Falls back to sequential computation where fork is unavailable (e.g. Windows) or in a daemonic process.
 
         :param processes: the maximal number of processes. Defaults to the number of CPUs.
         """
@@ -491,7 +770,9 @@ class KdF(CMF):
             if block and block[0] not in self._determinants
         ]
         processes = min(len(missing), processes or os.cpu_count() or 1)
-        if processes > 1 and "fork" in multiprocessing.get_all_start_methods():
+        # Daemonic processes (e.g. multiprocessing.Pool workers) cannot have children.
+        parallel = processes > 1 and not multiprocessing.current_process().daemon
+        if parallel and "fork" in multiprocessing.get_all_start_methods():
             global _forked_cmf
             _forked_cmf = self
             try:

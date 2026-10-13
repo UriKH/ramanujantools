@@ -3,9 +3,10 @@ import pickle
 import pytest
 import sympy as sp
 import mpmath as mp
-from sympy.abc import x, y
+from sympy.abc import n, x, y
 
-from ramanujantools.cmf import KdF
+from ramanujantools import Position
+from ramanujantools.cmf import CMF, KdF
 
 a0, a1, b0, nd0, ne0 = sp.symbols("a0 a1 b0 nd0 ne0")
 
@@ -52,8 +53,61 @@ def test_subs():
 
 
 def test_pickle():
-    cmf = KdF(1, 1, 0, 1, 0, 0)
-    assert cmf == pickle.loads(pickle.dumps(cmf))
+    cmf = KdF(2, 1, 0, 1, 1, 0, 1, 1)
+    cmf.determinant(a0)
+    unpickled = pickle.loads(pickle.dumps(cmf))
+    assert list(cmf.matrices.keys()) == list(unpickled.matrices.keys())
+    assert cmf == unpickled
+    assert cmf._determinants == unpickled._determinants
+
+
+@pytest.mark.parametrize(
+    "counts, arguments, start",
+    [
+        (
+            (2, 1, 0, 1, 1, 0),
+            (sp.Rational(1, 7), sp.Rational(1, 11)),
+            (3, 2, 5, -4, -2),
+        ),
+        ((2, 1, 0, 1, 1, 0), (1, 1), (sp.Rational(1, 2), 2, sp.Rational(3, 4), -3, -2)),
+        ((1, 1, 0, 1, 1, 0), (x, y), (sp.Rational(1, 3), 2, -4, -3)),
+    ],
+)
+def test_trajectory_matrix_native_steps(counts, arguments, start):
+    """The FLINT step matrices (with backward steps) agree with the default sympy path on the same matrices."""
+    cmf = KdF(*counts, *arguments)
+    axes = list(cmf.matrices.keys())
+    start = Position(dict(zip(axes, start)))
+    trajectory = Position(
+        {axis: (-1) ** k * (k % 3 + 1) for k, axis in enumerate(axes)}
+    )
+    reference = CMF(dict(cmf.matrices), validate=False)
+    assert reference.trajectory_matrix(trajectory, start) == cmf.trajectory_matrix(
+        trajectory, start
+    )
+
+
+def test_step_matrix_poles_match_default():
+    """On singular hyperplanes (a0 + nd0 + 1 = 0, nd0 = -1) the native step matrices have the same poles."""
+    cmf = KdF(2, 1, 0, 1, 1, 0, 1, 1)
+    axes = list(cmf.matrices.keys())
+    for base in ({a0: sp.Rational(1, 2) + n, nd0: sp.Rational(-3, 2) - n}, {nd0: -1}):
+        position = Position(
+            {axis: sp.Rational(k + 2, 7) for k, axis in enumerate(axes)}
+        )
+        position.update(base)
+        ctx = cmf.ctx(position)
+        for axis in axes:
+            for sign in (True, False):
+                results = []
+                for step_matrix in (KdF._step_matrix, CMF._step_matrix):
+                    try:
+                        results.append(
+                            step_matrix(cmf, axis, sign, position, ctx).factor()
+                        )
+                    except ZeroDivisionError:
+                        results.append(None)
+                assert results[0] == results[1]
 
 
 def test_contiguous_relations_of_series():
