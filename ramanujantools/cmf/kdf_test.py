@@ -168,3 +168,54 @@ def test_determinants_in_parallel():
 def test_determinant_invalid_axis():
     with pytest.raises(ValueError):
         KdF(1, 0, 0, 1, 1, 0).determinant(sp.Symbol("z0"))
+
+
+@pytest.mark.parametrize(
+    "counts, arguments",
+    [
+        ((2, 1, 0, 1, 1, 0), (sp.Rational(1, 7), sp.Rational(1, 11))),
+        ((2, 1, 0, 1, 1, 0), (1, 1)),
+        ((1, 1, 1, 1, 1, 0), (1, 1)),
+        ((1, 1, 0, 1, 1, 0), (x, y)),
+    ],
+)
+def test_poles(counts, arguments):
+    """Forward poles are exactly the factors of the reduced entry denominators; backward poles contain those of
+    the inverse."""
+    cmf = KdF(*counts, *arguments)
+    poles = cmf.poles()
+
+    def denominator_factors(matrix):
+        return {
+            sp.factor(f).as_coeff_Mul()[1]
+            for entry in matrix
+            for f, _ in sp.factor_list(sp.fraction(sp.cancel(entry))[1])[1]
+            if f.free_symbols
+        }
+
+    for axis in cmf.axes():
+        assert denominator_factors(cmf.M(axis)) == set(poles[axis]["forward"])
+        assert denominator_factors(cmf.M(axis, False)) <= set(poles[axis]["backward"])
+
+
+def test_has_nonlinear_poles():
+    assert not KdF(2, 1, 0, 1, 1, 0, 1, 1).has_nonlinear_poles()
+    assert KdF(
+        0, 0, 0, 2, 1, 1, sp.Rational(1, 4), sp.Rational(1, 4)
+    ).has_nonlinear_poles()
+
+
+@pytest.mark.parametrize(
+    "counts, arguments",
+    [
+        ((2, 1, 0, 1, 1, 0), (sp.Rational(1, 7), sp.Rational(1, 11))),
+        ((2, 1, 0, 1, 1, 0), (1, 1)),
+        ((1, 1, 0, 1, 1, 0), (x, y)),
+    ],
+)
+def test_negative_matrix(counts, arguments):
+    """M(axis, sign=False) (FLINT, per block by symmetry) equals the sympy inverse at axis - 1."""
+    cmf = KdF(*counts, *arguments)
+    for axis in cmf.axes():
+        expected = cmf.M(axis).inverse().subs({axis: axis - 1})
+        assert sp.simplify(cmf.M(axis, False) - expected) == sp.zeros(cmf.rank())

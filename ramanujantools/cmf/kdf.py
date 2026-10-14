@@ -117,6 +117,19 @@ class _SingularMatrix(ZeroDivisionError):
     pass
 
 
+def _swap(rows: list[list[FlintRational]], a: sp.Symbol, b: sp.Symbol) -> list:
+    """Swaps two generators in a matrix of FLINT rational functions."""
+    if a == b:
+        return rows
+    ctx = rows[0][0].ctx
+    names = [str(g) for g in ctx.gens()]
+    swapped = [
+        ctx.gens()[names.index(str(b if n == str(a) else a if n == str(b) else n))]
+        for n in names
+    ]
+    return [[_substitute(value, swapped) for value in row] for row in rows]
+
+
 def _substitute(value: FlintRational, values: list) -> FlintRational:
     """
     Substitutes the generators of the context of `value` by `values` (polynomials of another context).
@@ -290,6 +303,7 @@ class KdF(CMF):
         self._total = None
         self._sympy_operators = {}
         self._exact_steps = {}
+        self._poles = {}
         self._step_cache = OrderedDict()
         self._determinants = determinants
         axes = sum(KdF.blocks(*self.counts), ())
@@ -784,6 +798,95 @@ class KdF(CMF):
                 _forked_cmf = None
             self._determinants.update(zip(missing, results))
         return {axis: self.determinant(axis) for axis in self.matrices}
+
+    def M(self, axis: sp.Symbol, sign: bool = True) -> Matrix:
+        """
+        Returns the axis matrix, or for `sign=False` the matrix of a step back, i.e. the inverse of the axis matrix
+        at `axis - 1`. The inverse is computed in FLINT (once per block, by symmetry) instead of sympy.
+        """
+        if sign or axis in self._negative_matrices_cache:
+            return super().M(axis, sign)
+        representative = self._representative(axis)
+        rows = _swap(self._exact_step(representative, False), representative, axis)
+        self._negative_matrices_cache[axis] = Matrix(
+            [[_to_sympy(value) for value in row] for row in rows]
+        )
+        return self._negative_matrices_cache[axis]
+
+    def poles(self) -> dict[sp.Symbol, dict[str, list[sp.Expr]]]:
+        r"""
+        Returns, for every axis, the irreducible factors (in the parameters and arguments) whose zero sets
+        contain the poles of its step matrices:
+
+        - "forward": the poles of `M(axis)`, exactly (the denominators of its entries, in lowest terms).
+        - "backward": for `M(axis, sign=False)`, the factors of the numerator of the determinant and the forward
+          poles, both at `axis - 1`. Its poles are among these, since the inverse is the adjugate divided by
+          the determinant. The determinant factors are always poles of the inverse.
+
+        Cheap: only the denominators of the matrices of $\theta_x, \theta_y$ are factored. The backward poles
+        use `determinants()`.
+        """
+        result = {}
+        for axis in self.matrices:
+            representative = self._representative(axis)
+            if representative not in self._poles:
+                self._poles[representative] = self._representative_poles(representative)
+            swap = {representative: axis, axis: representative}
+            result[axis] = {
+                key: [factor.xreplace(swap) for factor in factors]
+                for key, factors in self._poles[representative].items()
+            }
+        return result
+
+    def has_nonlinear_poles(self) -> bool:
+        """True if some forward or backward pole factor is not linear in the parameters."""
+        parameters = set(self.matrices)
+        return any(
+            sp.Poly(factor, *(factor.free_symbols & parameters)).total_degree() > 1
+            for poles in self.poles().values()
+            for factors in poles.values()
+            for factor in factors
+            if factor.free_symbols & parameters
+        )
+
+    def _representative_poles(self, axis: sp.Symbol) -> dict[str, list[sp.Expr]]:
+        _, _, ctx = self._theta
+        name, normalizer = self._operator(axis)
+        operator = self._flint_operators()[name]
+        # A normalizer N = a or -(nd + 1) is linear: the entry (Theta + N delta) / N has a pole on N = 0 unless
+        # its numerator vanishes there, which is tested by substituting the root of N.
+        root = sp.solve(normalizer, axis)[0]
+        on_root = [
+            flint_converter(ctx)(root) if str(g) == str(axis) else g for g in ctx.gens()
+        ]
+        factors = {}
+        normalizer_is_pole = False
+        for i, row in enumerate(operator):
+            for j, value in enumerate(row):
+                for factor, _ in value.denominator.factor()[1]:
+                    factors[str(factor)] = factor
+                numerator = value.numerator
+                if i == j:
+                    numerator = (
+                        numerator + flint_converter(ctx)(normalizer) * value.denominator
+                    )
+                if numerator.compose(*on_root) != 0:
+                    normalizer_is_pole = True
+        forward = [_factor(factor)[1] for factor in factors.values()]
+        if normalizer_is_pole:
+            forward.append(_factor(flint_converter(ctx)(normalizer))[1])
+        forward = sorted(set(forward), key=sp.default_sort_key)
+        numerator, _ = sp.fraction(self.determinant(axis))
+        shift = {axis: axis - 1}
+        backward = {
+            sp.factor(f.subs(shift)).as_coeff_Mul()[1]
+            for f, _ in sp.factor_list(numerator)[1]
+            if f.free_symbols
+        } | {sp.factor(f.subs(shift)).as_coeff_Mul()[1] for f in forward}
+        return {
+            "forward": forward,
+            "backward": sorted(backward, key=sp.default_sort_key),
+        }
 
     def _representative(self, axis: sp.Symbol) -> sp.Symbol:
         return next(block[0] for block in KdF.blocks(*self.counts) if axis in block)
