@@ -1,0 +1,16 @@
+{"tree": "master", "case": "pFq(2,1,1/2) trajectory_matrix", "seconds": 0.04076790809631348}
+{"tree": "master", "case": "MeijerG(1,1,2,2) trajectory_matrix", "seconds": 0.04174089431762695}
+{"tree": "master", "case": "MeijerG(2,2,3,3) trajectory_matrix", "seconds": 0.07361197471618652}
+{"tree": "master", "case": "zeta3 trajectory_matrix", "seconds": 0.027285099029541016}
+{"tree": "master", "case": "pi walk 1000", "seconds": 0.02932596206665039}
+{"tree": "branch", "case": "pFq(2,1,1/2) trajectory_matrix", "seconds": 0.040923357009887695}
+{"tree": "branch", "case": "MeijerG(1,1,2,2) trajectory_matrix", "seconds": 0.04205584526062012}
+{"tree": "branch", "case": "MeijerG(2,2,3,3) trajectory_matrix", "seconds": 0.07349514961242676}
+{"tree": "branch", "case": "zeta3 trajectory_matrix", "seconds": 0.026927947998046875}
+{"tree": "branch", "case": "pi walk 1000", "seconds": 0.028477907180786133}
+{"tree": "master", "case": "pFq(3,2,1) trajectory_matrix", "seconds": 0.04100823402404785}
+{"tree": "master", "case": "pFq(3,2,1) negative steps", "seconds": 0.060791730880737305}
+{"tree": "master", "case": "pFq(3,2,1) walk 200", "seconds": 0.04165291786193848}
+{"tree": "branch", "case": "pFq(3,2,1) trajectory_matrix", "seconds": 0.04119610786437988}
+{"tree": "branch", "case": "pFq(3,2,1) negative steps", "seconds": 0.060404062271118164}
+{"tree": "branch", "case": "pFq(3,2,1) walk 200", "seconds": 0.04188895225524902}
